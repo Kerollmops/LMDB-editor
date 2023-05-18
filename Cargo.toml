@@ -1,0 +1,12 @@
+[package]
+name = "lmdb-editor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.71"
+bstr = "1.4.0"
+clap = { version = "4.2.7", features = ["derive"] }
+eframe = "0.21.3"
+env_logger = "0.10.0"
+heed = "0.20.0-alpha.0"
