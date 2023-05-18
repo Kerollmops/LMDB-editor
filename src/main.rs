@@ -12,12 +12,17 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let env_path = "edit-me.mdb";
-    std::fs::create_dir_all(env_path)?;
-    let env = EnvOpenOptions::new().open(env_path)?;
+    use rfd::FileDialog;
 
-    eframe::run_native("LMDB Editor", options, Box::new(|ctx| Box::new(LmdbEditor::new(env, ctx))))
+    if let Some(env_path) = FileDialog::new().pick_folder() {
+        let env = EnvOpenOptions::new().open(env_path)?;
+        eframe::run_native(
+            "LMDB Editor",
+            options,
+            Box::new(|ctx| Box::new(LmdbEditor::new(env, ctx))),
+        )
         .unwrap();
+    }
 
     Ok(())
 }
