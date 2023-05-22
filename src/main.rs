@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use std::mem;
 use std::ops::Deref;
 
 use eframe::egui;
@@ -37,6 +38,7 @@ fn main() -> anyhow::Result<()> {
 struct LmdbEditor {
     env: Env,
     database: (Option<String>, Database<ByteSlice, ByteSlice>),
+    database_to_open: String,
     entry_to_insert: EscapedEntry,
     wtxn: Option<heed::RwTxn<'static>>,
 }
@@ -55,6 +57,7 @@ impl LmdbEditor {
         LmdbEditor {
             env,
             database: (None, main_db),
+            database_to_open: String::new(),
             entry_to_insert: EscapedEntry::default(),
             wtxn: None,
         }
@@ -109,6 +112,40 @@ impl eframe::App for LmdbEditor {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.database_to_open)
+                            .hint_text("database name"),
+                    );
+                    if ui.button("open").clicked() {
+                        let env = ENV.wait();
+                        let database_name = if self.database_to_open.is_empty() {
+                            None
+                        } else {
+                            Some(mem::take(&mut self.database_to_open))
+                        };
+
+                        // If there is a write txn opened, use it, else use a new read txn.
+                        let long_rtxn;
+                        let rtxn;
+                        match self.wtxn.as_ref() {
+                            Some(wtxn) => rtxn = wtxn.deref(),
+                            None => {
+                                long_rtxn = self.env.read_txn().unwrap();
+                                rtxn = &long_rtxn;
+                            }
+                        };
+
+                        let db = env
+                            .open_database(&rtxn, database_name.as_ref().map(AsRef::as_ref))
+                            .unwrap()
+                            .unwrap();
+                        self.database = (database_name, db);
+                    }
+                });
+
+                ui.separator();
+
                 let button = if self.wtxn.is_some() {
                     egui::Button::new("start writing").fill(Color32::DARK_GREEN)
                 } else {
