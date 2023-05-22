@@ -3,6 +3,7 @@
 use std::ops::Deref;
 
 use eframe::egui;
+use egui::Color32;
 use heed::types::ByteSlice;
 use heed::{Database, Env, EnvOpenOptions};
 use once_cell::sync::OnceCell;
@@ -108,8 +109,13 @@ impl eframe::App for LmdbEditor {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // TODO make me green when wtxn is open
-                if ui.button("start writing").clicked() {
+                let button = if self.wtxn.is_some() {
+                    egui::Button::new("start writing").fill(Color32::DARK_GREEN)
+                } else {
+                    egui::Button::new("start writing").fill(Color32::DARK_RED)
+                };
+
+                if ui.add(button).clicked() && self.wtxn.is_none() {
                     let env = ENV.wait();
                     let wtxn = env.write_txn().unwrap();
                     self.wtxn = Some(wtxn);
