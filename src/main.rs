@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if let Some(env_path) = FileDialog::new().pick_folder() {
-        let env = EnvOpenOptions::new().open(env_path)?;
+        let env = EnvOpenOptions::new().max_dbs(1000).open(env_path)?;
         let _ = ENV.set(env.clone());
 
         eframe::run_native(
