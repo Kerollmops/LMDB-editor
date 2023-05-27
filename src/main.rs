@@ -5,6 +5,7 @@ use std::ops::Deref;
 
 use eframe::egui;
 use egui::Color32;
+use egui_extras::{Column, TableBuilder};
 use heed::types::ByteSlice;
 use heed::{Database, Env, EnvOpenOptions};
 use once_cell::sync::OnceCell;
@@ -184,35 +185,60 @@ impl eframe::App for LmdbEditor {
                 }
             };
 
-            let text_style = egui::TextStyle::Body;
-            let row_height = ui.text_style_height(&text_style);
-            // let row_height = ui.spacing().interact_size.y; // if you are adding buttons instead of labels.
-            let total_rows = self.database.1.len(&rtxn).unwrap().try_into().unwrap();
-            // TODO replace me with a prettier Table https://github.com/emilk/egui/blob/master/crates/egui_demo_lib/src/demo/table_demo.rs#L122
-            egui::ScrollArea::vertical().show_rows(ui, row_height, total_rows, |ui, row_range| {
-                let iter = self.database.1.iter(&rtxn).unwrap();
-                for result in iter.skip(row_range.start).take(row_range.len()) {
-                    let (key, data) = result.unwrap();
-                    ui.horizontal(|ui| {
-                        let encoded_key = stfu8::encode_u8_pretty(key);
-                        let encoded_data = stfu8::encode_u8_pretty(data);
-                        ui.label(&encoded_key);
-                        ui.separator();
-                        ui.label(&encoded_data);
-                        ui.separator();
-                        // Replace me by a ✏️
-                        if ui.button("edit").clicked() {
-                            self.entry_to_insert.key = encoded_key;
-                            self.entry_to_insert.data = encoded_data;
-                        }
-                        // // Replace me by a red 🗑️
-                        // if ui.button("delete").clicked() {
-                        //     if let Some(wtxn) = self.wtxn.as_mut() {
-                        //     }
-                        // }
+            let num_rows = self.database.1.len(&rtxn).unwrap().try_into().unwrap();
+            let mut prev_row_index = None;
+            let mut iter = self.database.1.iter(&rtxn).unwrap();
+
+            TableBuilder::new(ui)
+                .column(Column::auto().resizable(true))
+                .column(Column::auto().resizable(true))
+                .column(Column::remainder())
+                .header(20.0, |mut header| {
+                    header.col(|ui| {
+                        ui.label("Keys");
                     });
-                }
-            });
+                    header.col(|ui| {
+                        ui.label("Values");
+                    });
+                    header.col(|ui| {
+                        ui.label("Operations");
+                    });
+                })
+                .body(|body| {
+                    body.rows(30.0, num_rows, |row_index, mut row| {
+                        assert!(prev_row_index.map_or(true, |p| p + 1 == row_index));
+                        if prev_row_index.is_none() {
+                            let _ = iter.by_ref().skip(row_index).next();
+                            // iter.advance_by(row_index).unwrap();
+                        }
+                        prev_row_index = Some(row_index);
+
+                        if let Some(result) = iter.next() {
+                            let (key, data) = result.unwrap();
+                            let encoded_key = stfu8::encode_u8_pretty(key);
+                            let encoded_data = stfu8::encode_u8_pretty(data);
+
+                            row.col(|ui| {
+                                ui.label(&encoded_key);
+                            });
+                            row.col(|ui| {
+                                ui.label(&encoded_data);
+                            });
+                            row.col(|ui| {
+                                // TODO Replace me by a ✏️
+                                if ui.button("edit").clicked() {
+                                    self.entry_to_insert.key = encoded_key;
+                                    self.entry_to_insert.data = encoded_data;
+                                }
+                                // // Replace me by a red 🗑️
+                                // if ui.button("delete").clicked() {
+                                //     if let Some(wtxn) = self.wtxn.as_mut() {
+                                //     }
+                                // }
+                            });
+                        }
+                    });
+                });
         });
     }
 }
