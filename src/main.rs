@@ -3,6 +3,7 @@
 use std::mem;
 use std::ops::Deref;
 
+use crate::escaped_entry::EscapedEntry;
 use eframe::egui;
 use egui::Color32;
 use egui_extras::{Column, TableBuilder};
@@ -10,6 +11,8 @@ use heed::types::ByteSlice;
 use heed::{Database, Env, EnvOpenOptions};
 use once_cell::sync::OnceCell;
 use rfd::FileDialog;
+
+mod escaped_entry;
 
 static ENV: OnceCell<Env> = OnceCell::new();
 
@@ -240,26 +243,5 @@ impl eframe::App for LmdbEditor {
                     });
                 });
         });
-    }
-}
-
-#[derive(Debug, Default)]
-struct EscapedEntry {
-    key: String,
-    data: String,
-}
-
-impl EscapedEntry {
-    pub fn clear(&mut self) {
-        self.key.clear();
-        self.data.clear();
-    }
-
-    pub fn decoded_key(&self) -> Result<Vec<u8>, stfu8::DecodeError> {
-        stfu8::decode_u8(&self.key)
-    }
-
-    pub fn decoded_data(&self) -> Result<Vec<u8>, stfu8::DecodeError> {
-        stfu8::decode_u8(&self.data)
     }
 }
