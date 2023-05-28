@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use std::mem;
+use std::ops::Deref;
 
 use crate::escaped_entry::EscapedEntry;
 use eframe::egui::{self, InnerResponse};
@@ -57,20 +58,7 @@ impl LmdbEditor {
         let mut tiles = egui_tiles::Tiles::default();
         let mut tabs = vec![];
 
-        // tabs.push({
-        //     let children = (0..7)
-        //         .map(|_| tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }))
-        //         .collect();
-        //     tiles.insert_horizontal_tile(children)
-        // });
-        // tabs.push({
-        //     let cells = (0..11)
-        //         .map(|_| tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }))
-        //         .collect();
-        //     tiles.insert_grid_tile(cells)
-        // });
-
-        tabs.push(tiles.insert_pane(Pane::Editable {
+        tabs.push(tiles.insert_pane(Pane::DatabaseEntries {
             database_name: None,
             database: main_db,
             entry_to_insert: EscapedEntry::default(),
@@ -85,57 +73,10 @@ impl LmdbEditor {
 
 impl eframe::App for LmdbEditor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // egui::Window::new("Edit or Insert an Entry").default_pos([720.0, 480.0]).show(ctx, |ui| {
-        //     ui.style_mut().spacing.interact_size.y = 0.0; // hack to make `horizontal_wrapped` work better with text.
-
-        //     ui.label("We use STFU-8 as a hacky text encoding/decoding protocol for data that might be not quite UTF-8 but is still mostly UTF-8. \
-        //     It is based on the syntax of the repr created when you write (or print) binary text in python, C or other common programming languages.");
-
-        //     ui.add_space(8.0);
-
-        //     ui.label("Basically STFU-8 is the text format you already write when use escape codes in C, python, rust, etc. \
-        //     It permits binary data in UTF-8 by escaping them with \\, for instance \\n and \\x0F.");
-
-        //     ui.add_space(8.0);
-
-        //     ui.horizontal_wrapped(|ui| {
-        //         ui.spacing_mut().item_spacing.x = 0.0;
-        //         ui.label("More about how we interpret encoding/decoding ");
-        //         ui.hyperlink_to("on the stfu8 documentation", "https://docs.rs/stfu8");
-        //         ui.label(".");
-        //     });
-
-        //     ui.separator();
-
-        //     let EscapedEntry { key, data } = &mut self.entry_to_insert;
-        //     ui.add(egui::TextEdit::singleline(key).hint_text("escaped key"));
-        //     ui.add(egui::TextEdit::multiline(data).hint_text("escaped data"));
-
-        //     if ui.button("insert").clicked() {
-        //         if let Some(wtxn) = self.wtxn.as_mut() {
-        //             let key = self.entry_to_insert.decoded_key().unwrap();
-        //             let data = self.entry_to_insert.decoded_data().unwrap();
-        //             self.database.1.put(wtxn, &key, &data).unwrap();
-        //             self.entry_to_insert.clear();
-        //         }
-        //     }
-
-        //     if ui.button("delete").clicked() {
-        //         if let Some(wtxn) = self.wtxn.as_mut() {
-        //             let key = self.entry_to_insert.decoded_key().unwrap();
-        //             self.database.1.delete(wtxn, &key).unwrap();
-        //             self.entry_to_insert.clear();
-        //         }
-        //     }
-        // });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let button = if self.wtxn.is_some() {
-                    egui::Button::new("start writing").fill(Color32::GREEN)
-                } else {
-                    egui::Button::new("start writing").fill(Color32::RED)
-                };
+                let color = if self.wtxn.is_some() { Color32::GREEN } else { Color32::RED };
+                let button = egui::Button::new("start writing").fill(color);
 
                 if ui.add(button).clicked() && self.wtxn.is_none() {
                     let env = ENV.wait();
@@ -156,8 +97,10 @@ impl eframe::App for LmdbEditor {
                 }
             });
 
-            let mut behavior = TreeBehavior {};
-            self.tree.ui(&mut behavior, ui);
+            let LmdbEditor { wtxn, tree } = self;
+
+            let mut behavior = TreeBehavior { wtxn: wtxn.as_mut() };
+            tree.ui(&mut behavior, ui);
 
             // Automatically insert an OpenNew Tab when one is missing
             if let Some(root) = self.tree.root() {
@@ -192,7 +135,7 @@ impl eframe::App for LmdbEditor {
 }
 
 enum Pane {
-    Editable {
+    DatabaseEntries {
         database_name: Option<String>,
         database: Database<ByteSlice, ByteSlice>,
         entry_to_insert: EscapedEntry,
@@ -208,13 +151,15 @@ impl Pane {
     }
 }
 
-struct TreeBehavior {}
+struct TreeBehavior<'a> {
+    wtxn: Option<&'a mut heed::RwTxn<'static>>,
+}
 
-impl egui_tiles::Behavior<Pane> for TreeBehavior {
+impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::Editable { database_name: Some(name), .. } => format!("{name}").into(),
-            Pane::Editable { database_name: None, .. } => format!("{{main}}").into(),
+            Pane::DatabaseEntries { database_name: Some(name), .. } => format!("{name}").into(),
+            Pane::DatabaseEntries { database_name: None, .. } => format!("{{main}}").into(),
             Pane::OpenNew { .. } => format!("Open new").into(),
         }
     }
@@ -225,22 +170,67 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior {
         _tile_id: egui_tiles::TileId,
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
-        // If there is a write txn opened, use it, else use a new read txn.
-        let env = ENV.wait();
-        let long_rtxn;
-        let rtxn;
-        // match self.wtxn.as_ref() {
-        //     Some(wtxn) => rtxn = wtxn.deref(),
-        //     None => {
-        long_rtxn = env.read_txn().unwrap();
-        rtxn = &long_rtxn;
-        //     }
-        // };
-
         ui.add_space(5.0);
 
         match pane {
-            Pane::Editable { database, entry_to_insert, .. } => {
+            Pane::DatabaseEntries { database, entry_to_insert, database_name, .. } => {
+                let name = database_name.as_ref().map_or_else(|| "{main}".to_owned(), Clone::clone);
+                egui::Window::new(format!("Put an entry into {name}")).default_pos([720.0, 480.0]).show(ui.ctx(), |ui| {
+                    ui.style_mut().spacing.interact_size.y = 0.0; // hack to make `horizontal_wrapped` work better with text.
+
+                    ui.label("We use STFU-8 as a hacky text encoding/decoding protocol for data that might be not quite UTF-8 but is still mostly UTF-8. \
+                    It is based on the syntax of the repr created when you write (or print) binary text in python, C or other common programming languages.");
+
+                    ui.add_space(8.0);
+
+                    ui.label("Basically STFU-8 is the text format you already write when use escape codes in C, python, rust, etc. \
+                    It permits binary data in UTF-8 by escaping them with \\, for instance \\n and \\x0F.");
+
+                    ui.add_space(8.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label("More about how we interpret encoding/decoding ");
+                        ui.hyperlink_to("on the stfu8 documentation", "https://docs.rs/stfu8");
+                        ui.label(".");
+                    });
+
+                    ui.separator();
+
+                    let EscapedEntry { key, data } = entry_to_insert;
+                    ui.add(egui::TextEdit::singleline(key).hint_text("escaped key"));
+                    ui.add(egui::TextEdit::multiline(data).hint_text("escaped data"));
+
+                    if ui.button("insert").clicked() {
+                        if let Some(wtxn) = self.wtxn.as_mut() {
+                            let key = entry_to_insert.decoded_key().unwrap();
+                            let data = entry_to_insert.decoded_data().unwrap();
+                            database.put(wtxn, &key, &data).unwrap();
+                            entry_to_insert.clear();
+                        }
+                    }
+
+                    if ui.button("delete").clicked() {
+                        if let Some(wtxn) = self.wtxn.as_mut() {
+                            let key = entry_to_insert.decoded_key().unwrap();
+                            database.delete(wtxn, &key).unwrap();
+                            entry_to_insert.clear();
+                        }
+                    }
+                });
+
+                // If there is a write txn opened, use it, else use a new read txn.
+                let env = ENV.wait();
+                let long_rtxn: heed::RoTxn;
+                let rtxn: &heed::RoTxn;
+                match self.wtxn.as_ref() {
+                    Some(wtxn) => rtxn = wtxn.deref(),
+                    None => {
+                        long_rtxn = env.read_txn().unwrap();
+                        rtxn = &long_rtxn;
+                    }
+                };
+
                 let num_rows = database.len(&rtxn).unwrap().try_into().unwrap();
                 let mut prev_row_index = None;
                 let mut iter = database.iter(&rtxn).unwrap();
@@ -298,6 +288,18 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior {
             }
             Pane::OpenNew { database_to_open } => {
                 let response = ui.horizontal(|ui| {
+                    // If there is a write txn opened, use it, else use a new read txn.
+                    let env = ENV.wait();
+                    let long_rtxn: heed::RoTxn;
+                    let rtxn: &heed::RoTxn;
+                    match self.wtxn.as_ref() {
+                        Some(wtxn) => rtxn = wtxn.deref(),
+                        None => {
+                            long_rtxn = env.read_txn().unwrap();
+                            rtxn = &long_rtxn;
+                        }
+                    };
+
                     ui.add(egui::TextEdit::singleline(database_to_open).hint_text("database name"));
                     if ui.button("open").clicked() {
                         let env = ENV.wait();
@@ -309,13 +311,16 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior {
 
                         let database = env
                             .open_database(&rtxn, database_name.as_ref().map(AsRef::as_ref))
-                            .unwrap()
                             .unwrap();
-                        Some(Pane::Editable {
-                            database_name,
-                            database,
-                            entry_to_insert: Default::default(),
-                        })
+
+                        match database {
+                            Some(database) => Some(Pane::DatabaseEntries {
+                                database_name,
+                                database,
+                                entry_to_insert: Default::default(),
+                            }),
+                            None => None,
+                        }
                     } else {
                         None
                     }
