@@ -254,7 +254,6 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                 };
 
                 let num_rows = database.len(&rtxn).unwrap().try_into().unwrap();
-                let mut prev_row_index = None;
                 let mut iter = database.iter(&rtxn).unwrap();
 
                 TableBuilder::new(ui)
@@ -273,14 +272,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                         });
                     })
                     .body(|body| {
-                        body.rows(30.0, num_rows, |row_index, mut row| {
-                            assert!(prev_row_index.map_or(true, |p| p + 1 == row_index));
-                            if prev_row_index.is_none() {
-                                let _ = iter.by_ref().skip(row_index).next();
-                                // iter.advance_by(row_index).unwrap();
-                            }
-                            prev_row_index = Some(row_index);
-
+                        body.rows(30.0, num_rows, |_row_index, mut row| {
                             if let Some(result) = iter.next() {
                                 let (key, data) = result.unwrap();
                                 let encoded_key = stfu8::encode_u8_pretty(key);
