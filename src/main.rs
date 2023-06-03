@@ -276,8 +276,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                         body.rows(30.0, num_rows, |row_index, mut row| {
                             assert!(prev_row_index.map_or(true, |p| p + 1 == row_index));
                             if prev_row_index.is_none() {
-                                let _ = iter.by_ref().skip(row_index).next();
-                                // iter.advance_by(row_index).unwrap();
+                                iter.by_ref().take(row_index).for_each(drop);
                             }
                             prev_row_index = Some(row_index);
 
