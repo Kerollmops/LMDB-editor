@@ -77,14 +77,14 @@ impl LmdbEditor {
         wtxn.commit().unwrap();
 
         let mut tiles = egui_tiles::Tiles::default();
-        let mut tabs = vec![];
-
-        tabs.push(tiles.insert_pane(Pane::DatabaseEntries {
-            database_name: None,
-            database: main_db,
-            entry_to_insert: EscapedEntry::default(),
-        }));
-        tabs.push(tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }));
+        let tabs = vec![
+            tiles.insert_pane(Pane::DatabaseEntries {
+                database_name: None,
+                database: main_db,
+                entry_to_insert: EscapedEntry::default(),
+            }),
+            tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }),
+        ];
         let root = tiles.insert_tab_tile(tabs);
         let tree = egui_tiles::Tree::new(root, tiles);
 
@@ -130,16 +130,14 @@ impl eframe::App for LmdbEditor {
             // Automatically insert an OpenNew Tab when one is missing
             if let Some(root) = self.tree.root() {
                 let must_insert = match self.tree.tiles.get(root).unwrap() {
-                    Tile::Container(Container::Tabs(t)) => t
-                        .children
-                        .iter()
-                        .find(|&&t| {
-                            self.tree
-                                .tiles
-                                .get(t)
-                                .map_or(true, |t| matches!(t, Tile::Pane(p) if p.is_open_new()))
+                    Tile::Container(Container::Tabs(tabs)) => {
+                        !tabs.children.iter().any(|&tile_id| {
+                            self.tree.tiles.get(tile_id).map_or(
+                                true,
+                                |tile| matches!(tile, Tile::Pane(pane) if pane.is_open_new()),
+                            )
                         })
-                        .is_none(),
+                    }
                     _ => false,
                 };
 
@@ -183,9 +181,9 @@ struct TreeBehavior<'a> {
 impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::DatabaseEntries { database_name: Some(name), .. } => format!("{name}").into(),
-            Pane::DatabaseEntries { database_name: None, .. } => format!("{{main}}").into(),
-            Pane::OpenNew { .. } => format!("Open new").into(),
+            Pane::DatabaseEntries { database_name: Some(name), .. } => name.into(),
+            Pane::DatabaseEntries { database_name: None, .. } => "{main}".into(),
+            Pane::OpenNew { .. } => "Open new".into(),
         }
     }
 
@@ -329,18 +327,13 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                             Some(std::mem::take(database_to_open))
                         };
 
-                        let database = env
-                            .open_database(&rtxn, database_name.as_ref().map(AsRef::as_ref))
-                            .unwrap();
-
-                        match database {
-                            Some(database) => Some(Pane::DatabaseEntries {
-                                database_name,
+                        env.open_database(rtxn, database_name.as_ref().map(AsRef::as_ref))
+                            .unwrap()
+                            .map(|database| Pane::DatabaseEntries {
                                 database,
+                                database_name,
                                 entry_to_insert: Default::default(),
-                            }),
-                            None => None,
-                        }
+                            })
                     } else {
                         None
                     }
