@@ -9,8 +9,10 @@ use egui::Color32;
 use egui_extras::{Column, TableBuilder};
 use egui_tiles::Container;
 use egui_tiles::Tile;
+use either::Either;
 use heed::types::ByteSlice;
 use heed::{Database, Env, EnvOpenOptions};
+use heed::{RoTxn, RwTxn};
 use once_cell::sync::OnceCell;
 use rfd::FileDialog;
 
@@ -38,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 struct LmdbEditor {
-    wtxn: Option<heed::RwTxn<'static>>,
+    txn: Either<RoTxn<'static>, RwTxn<'static>>,
     tree: egui_tiles::Tree<Pane>,
 }
 
@@ -67,7 +69,8 @@ impl LmdbEditor {
         let root = tiles.insert_tab_tile(tabs);
         let tree = egui_tiles::Tree::new(root, tiles);
 
-        LmdbEditor { wtxn: None, tree }
+        let rtxn = env.read_txn().unwrap();
+        LmdbEditor { txn: Either::Left(rtxn), tree }
     }
 }
 
@@ -75,31 +78,38 @@ impl eframe::App for LmdbEditor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let color = if self.wtxn.is_some() { Color32::GREEN } else { Color32::RED };
-                let button = egui::Button::new("start writing").fill(color);
+                let env = ENV.wait();
+                let button = if self.txn.is_right() {
+                    egui::Button::new("currently writing").fill(Color32::GREEN)
+                } else {
+                    egui::Button::new("currently reading").fill(Color32::RED)
+                };
 
-                if ui.add(button).clicked() && self.wtxn.is_none() {
-                    let env = ENV.wait();
+                if ui.add(button).clicked() && self.txn.is_left() {
                     let wtxn = env.write_txn().unwrap();
-                    self.wtxn = Some(wtxn);
+                    self.txn = Either::Right(wtxn);
                 }
 
                 if ui.button("commit changes").clicked() {
-                    if let Some(wtxn) = self.wtxn.take() {
+                    if let Some(wtxn) =
+                        replace_right_with(&mut self.txn, || env.read_txn().unwrap())
+                    {
                         wtxn.commit().unwrap();
                     }
                 }
 
                 if ui.button("abort changes").clicked() {
-                    if let Some(wtxn) = self.wtxn.take() {
+                    if let Some(wtxn) =
+                        replace_right_with(&mut self.txn, || env.read_txn().unwrap())
+                    {
                         wtxn.abort();
                     }
                 }
             });
 
-            let LmdbEditor { wtxn, tree } = self;
+            let LmdbEditor { txn, tree } = self;
 
-            let mut behavior = TreeBehavior { wtxn: wtxn.as_mut() };
+            let mut behavior = TreeBehavior { txn: txn.as_mut() };
             tree.ui(&mut behavior, ui);
 
             // Automatically insert an OpenNew Tab when one is missing
@@ -134,6 +144,19 @@ impl eframe::App for LmdbEditor {
     }
 }
 
+fn replace_right_with<L, R, F: FnMut() -> L>(either: &mut Either<L, R>, mut f: F) -> Option<R> {
+    match either {
+        Either::Left(_) => None,
+        Either::Right(_) => {
+            let obvious_right = mem::replace(either, Either::Left(f()));
+            match obvious_right {
+                Either::Left(_) => unreachable!(),
+                Either::Right(right) => Some(right),
+            }
+        }
+    }
+}
+
 enum Pane {
     DatabaseEntries {
         database_name: Option<String>,
@@ -152,7 +175,7 @@ impl Pane {
 }
 
 struct TreeBehavior<'a> {
-    wtxn: Option<&'a mut heed::RwTxn<'static>>,
+    txn: Either<&'a mut RoTxn<'static>, &'a mut RwTxn<'static>>,
 }
 
 impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
@@ -202,7 +225,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     ui.add(egui::TextEdit::multiline(data).hint_text("escaped data"));
 
                     if ui.button("insert").clicked() {
-                        if let Some(wtxn) = self.wtxn.as_mut() {
+                        if let Either::Right(wtxn) = self.txn.as_mut() {
                             let key = entry_to_insert.decoded_key().unwrap();
                             let data = entry_to_insert.decoded_data().unwrap();
                             database.put(wtxn, &key, &data).unwrap();
@@ -211,7 +234,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     }
 
                     if ui.button("delete").clicked() {
-                        if let Some(wtxn) = self.wtxn.as_mut() {
+                        if let Either::Right(wtxn) = self.txn.as_mut() {
                             let key = entry_to_insert.decoded_key().unwrap();
                             database.delete(wtxn, &key).unwrap();
                             entry_to_insert.clear();
@@ -219,15 +242,14 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     }
                 });
 
-                // If there is a write txn opened, use it, else use a new read txn.
-                let env = ENV.wait();
-                let long_rtxn: heed::RoTxn;
+                // If there is a write txn opened, use it, else make the wtxn live longer and deref it.
+                let long_wtxn: &&mut RwTxn;
                 let rtxn: &heed::RoTxn;
-                match self.wtxn.as_ref() {
-                    Some(wtxn) => rtxn = wtxn.deref(),
-                    None => {
-                        long_rtxn = env.read_txn().unwrap();
-                        rtxn = &long_rtxn;
+                match self.txn.as_ref() {
+                    Either::Left(txn) => rtxn = txn,
+                    Either::Right(wtxn) => {
+                        long_wtxn = wtxn;
+                        rtxn = long_wtxn.deref();
                     }
                 };
 
@@ -288,15 +310,14 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
             }
             Pane::OpenNew { database_to_open } => {
                 let response = ui.horizontal(|ui| {
-                    // If there is a write txn opened, use it, else use a new read txn.
-                    let env = ENV.wait();
-                    let long_rtxn: heed::RoTxn;
+                    // If there is a write txn opened, use it, else make the wtxn live longer and deref it.
+                    let long_wtxn: &&mut RwTxn;
                     let rtxn: &heed::RoTxn;
-                    match self.wtxn.as_ref() {
-                        Some(wtxn) => rtxn = wtxn.deref(),
-                        None => {
-                            long_rtxn = env.read_txn().unwrap();
-                            rtxn = &long_rtxn;
+                    match self.txn.as_ref() {
+                        Either::Left(txn) => rtxn = txn,
+                        Either::Right(wtxn) => {
+                            long_wtxn = wtxn;
+                            rtxn = long_wtxn.deref();
                         }
                     };
 

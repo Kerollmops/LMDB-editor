@@ -1550,6 +1550,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "egui_tiles",
+ "either",
  "env_logger",
  "heed",
  "once_cell",
