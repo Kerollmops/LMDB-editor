@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use std::mem;
 use std::ops::Deref;
 
 use eframe::egui::{self, InnerResponse};
@@ -41,17 +42,37 @@ enum Txn {
     Ro(RoTxn<'static>),
     /// A read-write transaction.
     Rw(RwTxn<'static>),
+    None,
 }
 
 impl Txn {
-    fn replace_with_ro(&mut self, env: &'static Env) -> Option<RwTxn<'static>> {
+    /// Commit read-write transaction and change it to read-only. Noop for `Txn::Ro`.
+    fn commit(&mut self, env: &'static Env) {
+        self.end_rw(env, |wtxn| wtxn.commit().unwrap());
+    }
+
+    /// Abort read-write transaction and change it to read-only. Noop for `Txn::Ro`.
+    fn abort(&mut self, env: &'static Env) {
+        self.end_rw(env, |wtxn| wtxn.abort());
+    }
+
+    fn end_rw(&mut self, env: &'static Env, f: fn(RwTxn<'static>)) {
         match self {
-            Txn::Ro(_) => None,
-            Txn::Rw(_) => {
+            Self::Ro(_) => {}
+            Self::None => unreachable!(),
+            Self::Rw(_) => {
+                // We should call `f` (which commits or aborts the read-write
+                // transaction) before creating a new read-only transaction,
+                // otherwise the read-only transaction will not see the changes
+                // made by the read-write transaction.
+                match mem::replace(self, Self::None) {
+                    Self::Rw(wtxn) => f(wtxn),
+                    Self::Ro(_) | Self::None => unreachable!(),
+                }
                 let rtxn = env.read_txn().unwrap();
-                match std::mem::replace(self, Txn::Ro(rtxn)) {
-                    Txn::Rw(wtxn) => Some(wtxn),
-                    Txn::Ro(_) => unreachable!(),
+                match mem::replace(self, Self::Ro(rtxn)) {
+                    Self::None => {}
+                    Self::Ro(_) | Self::Rw(_) => unreachable!(),
                 }
             }
         }
@@ -110,15 +131,11 @@ impl eframe::App for LmdbEditor {
                 }
 
                 if ui.button("commit changes").clicked() {
-                    if let Some(wtxn) = self.txn.replace_with_ro(env) {
-                        wtxn.commit().unwrap();
-                    }
+                    self.txn.commit(env);
                 }
 
                 if ui.button("abort changes").clicked() {
-                    if let Some(wtxn) = self.txn.replace_with_ro(env) {
-                        wtxn.abort();
-                    }
+                    self.txn.abort(env);
                 }
             });
 
@@ -250,6 +267,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                         long_wtxn = wtxn;
                         long_wtxn.deref()
                     }
+                    Txn::None => unreachable!(),
                 };
 
                 let num_rows = database.len(rtxn).unwrap().try_into().unwrap();
@@ -316,6 +334,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                             long_wtxn = wtxn;
                             long_wtxn.deref()
                         }
+                        Txn::None => unreachable!(),
                     };
 
                     ui.add(egui::TextEdit::singleline(database_to_open).hint_text("database name"));
@@ -324,7 +343,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                         let database_name = if database_to_open.is_empty() {
                             None
                         } else {
-                            Some(std::mem::take(database_to_open))
+                            Some(mem::take(database_to_open))
                         };
 
                         env.open_database(rtxn, database_name.as_ref().map(AsRef::as_ref))
