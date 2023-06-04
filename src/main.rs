@@ -56,9 +56,20 @@ impl Txn {
         self.end_rw(env, |wtxn| wtxn.abort());
     }
 
+    /// Refresh the current read transaction. Noop fro `Txn::Rw`.
+    fn refresh(&mut self, env: &'static Env) {
+        if matches!(self, Self::Ro(_)) {
+            // We must drop the rtxn before opening a new one as it is forbidden
+            // to have two transactions on the same thread at any given time.
+            let rtxn = mem::replace(self, Self::None);
+            drop(rtxn);
+            *self = Self::Ro(env.read_txn().unwrap());
+        }
+    }
+
     fn end_rw(&mut self, env: &'static Env, f: fn(RwTxn<'static>)) {
         match self {
-            Self::Ro(_) => {}
+            Self::Ro(_) => (),
             Self::None => unreachable!(),
             Self::Rw(_) => {
                 // We should call `f` (which commits or aborts the read-write
@@ -71,7 +82,7 @@ impl Txn {
                 }
                 let rtxn = env.read_txn().unwrap();
                 match mem::replace(self, Self::Ro(rtxn)) {
-                    Self::None => {}
+                    Self::None => (),
                     Self::Ro(_) | Self::Rw(_) => unreachable!(),
                 }
             }
@@ -122,7 +133,7 @@ impl eframe::App for LmdbEditor {
                 let button = if matches!(self.txn, Txn::Rw(_)) {
                     egui::Button::new("currently writing").fill(Color32::GREEN)
                 } else {
-                    egui::Button::new("currently reading").fill(Color32::RED)
+                    egui::Button::new("start writing")
                 };
 
                 if ui.add(button).clicked() && matches!(self.txn, Txn::Ro(_)) {
@@ -130,12 +141,18 @@ impl eframe::App for LmdbEditor {
                     self.txn = Txn::Rw(wtxn);
                 }
 
-                if ui.button("commit changes").clicked() {
-                    self.txn.commit(env);
-                }
+                if matches!(self.txn, Txn::Rw(_)) {
+                    if ui.button("commit changes").clicked() {
+                        self.txn.commit(env);
+                    }
 
-                if ui.button("abort changes").clicked() {
-                    self.txn.abort(env);
+                    if ui.button("abort changes").clicked() {
+                        self.txn.abort(env);
+                    }
+                } else {
+                    if ui.button("refresh").clicked() {
+                        self.txn.refresh(env);
+                    }
                 }
             });
 
