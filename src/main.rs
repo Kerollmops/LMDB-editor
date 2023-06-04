@@ -3,18 +3,16 @@
 use std::mem;
 use std::ops::Deref;
 
-use crate::escaped_entry::EscapedEntry;
 use eframe::egui::{self, InnerResponse};
 use egui::Color32;
 use egui_extras::{Column, TableBuilder};
-use egui_tiles::Container;
-use egui_tiles::Tile;
-use either::Either;
+use egui_tiles::{Container, Tile};
 use heed::types::ByteSlice;
-use heed::{Database, Env, EnvOpenOptions};
-use heed::{RoTxn, RwTxn};
+use heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn};
 use once_cell::sync::OnceCell;
 use rfd::FileDialog;
+
+use crate::escaped_entry::EscapedEntry;
 
 mod escaped_entry;
 
@@ -39,8 +37,50 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+enum Txn {
+    /// A read-only transaction.
+    Ro(RoTxn<'static>),
+    /// A read-write transaction.
+    Rw(RwTxn<'static>),
+    None,
+}
+
+impl Txn {
+    /// Commit read-write transaction and change it to read-only. Noop for `Txn::Ro`.
+    fn commit(&mut self, env: &'static Env) {
+        self.end_rw(env, |wtxn| wtxn.commit().unwrap());
+    }
+
+    /// Abort read-write transaction and change it to read-only. Noop for `Txn::Ro`.
+    fn abort(&mut self, env: &'static Env) {
+        self.end_rw(env, |wtxn| wtxn.abort());
+    }
+
+    fn end_rw(&mut self, env: &'static Env, f: fn(RwTxn<'static>)) {
+        match self {
+            Self::Ro(_) => {}
+            Self::None => unreachable!(),
+            Self::Rw(_) => {
+                // We should call `f` (which commits or aborts the read-write
+                // transaction) before creating a new read-only transaction,
+                // otherwise the read-only transaction will not see the changes
+                // made by the read-write transaction.
+                match mem::replace(self, Self::None) {
+                    Self::Rw(wtxn) => f(wtxn),
+                    Self::Ro(_) | Self::None => unreachable!(),
+                }
+                let rtxn = env.read_txn().unwrap();
+                match mem::replace(self, Self::Ro(rtxn)) {
+                    Self::None => {}
+                    Self::Ro(_) | Self::Rw(_) => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
 struct LmdbEditor {
-    txn: Either<RoTxn<'static>, RwTxn<'static>>,
+    txn: Txn,
     tree: egui_tiles::Tree<Pane>,
 }
 
@@ -58,19 +98,19 @@ impl LmdbEditor {
         wtxn.commit().unwrap();
 
         let mut tiles = egui_tiles::Tiles::default();
-        let mut tabs = vec![];
-
-        tabs.push(tiles.insert_pane(Pane::DatabaseEntries {
-            database_name: None,
-            database: main_db,
-            entry_to_insert: EscapedEntry::default(),
-        }));
-        tabs.push(tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }));
+        let tabs = vec![
+            tiles.insert_pane(Pane::DatabaseEntries {
+                database_name: None,
+                database: main_db,
+                entry_to_insert: EscapedEntry::default(),
+            }),
+            tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }),
+        ];
         let root = tiles.insert_tab_tile(tabs);
         let tree = egui_tiles::Tree::new(root, tiles);
 
         let rtxn = env.read_txn().unwrap();
-        LmdbEditor { txn: Either::Left(rtxn), tree }
+        LmdbEditor { txn: Txn::Ro(rtxn), tree }
     }
 }
 
@@ -79,52 +119,42 @@ impl eframe::App for LmdbEditor {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let env = ENV.wait();
-                let button = if self.txn.is_right() {
+                let button = if matches!(self.txn, Txn::Rw(_)) {
                     egui::Button::new("currently writing").fill(Color32::GREEN)
                 } else {
                     egui::Button::new("currently reading").fill(Color32::RED)
                 };
 
-                if ui.add(button).clicked() && self.txn.is_left() {
+                if ui.add(button).clicked() && matches!(self.txn, Txn::Ro(_)) {
                     let wtxn = env.write_txn().unwrap();
-                    self.txn = Either::Right(wtxn);
+                    self.txn = Txn::Rw(wtxn);
                 }
 
                 if ui.button("commit changes").clicked() {
-                    if let Some(wtxn) =
-                        replace_right_with(&mut self.txn, || env.read_txn().unwrap())
-                    {
-                        wtxn.commit().unwrap();
-                    }
+                    self.txn.commit(env);
                 }
 
                 if ui.button("abort changes").clicked() {
-                    if let Some(wtxn) =
-                        replace_right_with(&mut self.txn, || env.read_txn().unwrap())
-                    {
-                        wtxn.abort();
-                    }
+                    self.txn.abort(env);
                 }
             });
 
-            let LmdbEditor { txn, tree } = self;
+            let LmdbEditor { ref mut txn, tree } = self;
 
-            let mut behavior = TreeBehavior { txn: txn.as_mut() };
+            let mut behavior = TreeBehavior { txn };
             tree.ui(&mut behavior, ui);
 
             // Automatically insert an OpenNew Tab when one is missing
             if let Some(root) = self.tree.root() {
                 let must_insert = match self.tree.tiles.get(root).unwrap() {
-                    Tile::Container(Container::Tabs(t)) => t
-                        .children
-                        .iter()
-                        .find(|&&t| {
-                            self.tree
-                                .tiles
-                                .get(t)
-                                .map_or(true, |t| matches!(t, Tile::Pane(p) if p.is_open_new()))
+                    Tile::Container(Container::Tabs(tabs)) => {
+                        !tabs.children.iter().any(|&tile_id| {
+                            self.tree.tiles.get(tile_id).map_or(
+                                true,
+                                |tile| matches!(tile, Tile::Pane(pane) if pane.is_open_new()),
+                            )
                         })
-                        .is_none(),
+                    }
                     _ => false,
                 };
 
@@ -141,19 +171,6 @@ impl eframe::App for LmdbEditor {
                 }
             }
         });
-    }
-}
-
-fn replace_right_with<L, R, F: FnMut() -> L>(either: &mut Either<L, R>, mut f: F) -> Option<R> {
-    match either {
-        Either::Left(_) => None,
-        Either::Right(_) => {
-            let obvious_right = mem::replace(either, Either::Left(f()));
-            match obvious_right {
-                Either::Left(_) => unreachable!(),
-                Either::Right(right) => Some(right),
-            }
-        }
     }
 }
 
@@ -175,15 +192,15 @@ impl Pane {
 }
 
 struct TreeBehavior<'a> {
-    txn: Either<&'a mut RoTxn<'static>, &'a mut RwTxn<'static>>,
+    txn: &'a mut Txn,
 }
 
 impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::DatabaseEntries { database_name: Some(name), .. } => format!("{name}").into(),
-            Pane::DatabaseEntries { database_name: None, .. } => format!("{{main}}").into(),
-            Pane::OpenNew { .. } => format!("Open new").into(),
+            Pane::DatabaseEntries { database_name: Some(name), .. } => name.into(),
+            Pane::DatabaseEntries { database_name: None, .. } => "{main}".into(),
+            Pane::OpenNew { .. } => "Open new".into(),
         }
     }
 
@@ -225,7 +242,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     ui.add(egui::TextEdit::multiline(data).hint_text("escaped data"));
 
                     if ui.button("insert").clicked() {
-                        if let Either::Right(wtxn) = self.txn.as_mut() {
+                        if let Txn::Rw(ref mut wtxn) = self.txn {
                             let key = entry_to_insert.decoded_key().unwrap();
                             let data = entry_to_insert.decoded_data().unwrap();
                             database.put(wtxn, &key, &data).unwrap();
@@ -234,7 +251,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     }
 
                     if ui.button("delete").clicked() {
-                        if let Either::Right(wtxn) = self.txn.as_mut() {
+                        if let Txn::Rw(ref mut wtxn) = self.txn {
                             let key = entry_to_insert.decoded_key().unwrap();
                             database.delete(wtxn, &key).unwrap();
                             entry_to_insert.clear();
@@ -242,20 +259,20 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     }
                 });
 
-                // If there is a write txn opened, use it, else make the wtxn live longer and deref it.
-                let long_wtxn: &&mut RwTxn;
-                let rtxn: &heed::RoTxn;
-                match self.txn.as_ref() {
-                    Either::Left(txn) => rtxn = txn,
-                    Either::Right(wtxn) => {
+                // If there is a write txn opened, use it, otherwise make the wtxn live longer and deref it.
+                let long_wtxn: &RwTxn;
+                let rtxn = match self.txn {
+                    Txn::Ro(ref rtxn) => rtxn,
+                    Txn::Rw(ref wtxn) => {
                         long_wtxn = wtxn;
-                        rtxn = long_wtxn.deref();
+                        long_wtxn.deref()
                     }
+                    Txn::None => unreachable!(),
                 };
 
-                let num_rows = database.len(&rtxn).unwrap().try_into().unwrap();
+                let num_rows = database.len(rtxn).unwrap().try_into().unwrap();
                 let mut prev_row_index = None;
-                let mut iter = database.iter(&rtxn).unwrap();
+                let mut iter = database.iter(rtxn).unwrap();
 
                 TableBuilder::new(ui)
                     .column(Column::auto().resizable(true))
@@ -309,15 +326,15 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
             }
             Pane::OpenNew { database_to_open } => {
                 let response = ui.horizontal(|ui| {
-                    // If there is a write txn opened, use it, else make the wtxn live longer and deref it.
-                    let long_wtxn: &&mut RwTxn;
-                    let rtxn: &heed::RoTxn;
-                    match self.txn.as_ref() {
-                        Either::Left(txn) => rtxn = txn,
-                        Either::Right(wtxn) => {
+                    // If there is a write txn opened, use it, otherwise make the wtxn live longer and deref it.
+                    let long_wtxn: &RwTxn;
+                    let rtxn = match self.txn {
+                        Txn::Ro(ref rtxn) => rtxn,
+                        Txn::Rw(ref wtxn) => {
                             long_wtxn = wtxn;
-                            rtxn = long_wtxn.deref();
+                            long_wtxn.deref()
                         }
+                        Txn::None => unreachable!(),
                     };
 
                     ui.add(egui::TextEdit::singleline(database_to_open).hint_text("database name"));
@@ -329,18 +346,13 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                             Some(mem::take(database_to_open))
                         };
 
-                        let database = env
-                            .open_database(&rtxn, database_name.as_ref().map(AsRef::as_ref))
-                            .unwrap();
-
-                        match database {
-                            Some(database) => Some(Pane::DatabaseEntries {
-                                database_name,
+                        env.open_database(rtxn, database_name.as_ref().map(AsRef::as_ref))
+                            .unwrap()
+                            .map(|database| Pane::DatabaseEntries {
                                 database,
+                                database_name,
                                 entry_to_insert: Default::default(),
-                            }),
-                            None => None,
-                        }
+                            })
                     } else {
                         None
                     }
