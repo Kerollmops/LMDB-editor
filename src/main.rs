@@ -59,11 +59,23 @@ impl LmdbEditor {
 
         let mut tiles = egui_tiles::Tiles::default();
         let tabs = vec![
-            tiles.insert_pane(Pane::DatabaseEntries {
-                database_name: None,
-                database: main_db,
-                entry_to_insert: EscapedEntry::default(),
-            }),
+            {
+                let children = vec![
+                    tiles.insert_pane(Pane::DatabaseEntries {
+                        database_name: None,
+                        database: main_db,
+                        entry_to_insert: EscapedEntry::default(),
+                    }),
+                    tiles.insert_pane(Pane::DatabaseStats {
+                        database_name: None,
+                        number_of_entries: 0,
+                        total_key_size: 0,
+                        total_value_size: 0,
+                        total_entries_size: 0,
+                    }),
+                ];
+                tiles.insert_horizontal_tile(children)
+            },
             tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }),
         ];
         let root = tiles.insert_tab_tile(tabs);
@@ -146,6 +158,13 @@ enum Pane {
         database: Database<ByteSlice, ByteSlice>,
         entry_to_insert: EscapedEntry,
     },
+    DatabaseStats {
+        database_name: Option<String>,
+        number_of_entries: usize,
+        total_key_size: usize,
+        total_value_size: usize,
+        total_entries_size: usize,
+    },
     OpenNew {
         database_to_open: String,
     },
@@ -166,6 +185,8 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
         match pane {
             Pane::DatabaseEntries { database_name: Some(name), .. } => name.into(),
             Pane::DatabaseEntries { database_name: None, .. } => "{main}".into(),
+            Pane::DatabaseStats { database_name: Some(name), .. } => format!("{name} stats").into(),
+            Pane::DatabaseStats { database_name: None, .. } => "{main} stats".into(),
             Pane::OpenNew { .. } => "Open new".into(),
         }
     }
@@ -288,6 +309,35 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                                 });
                             }
                         });
+                    });
+            }
+            Pane::DatabaseStats {
+                database_name,
+                number_of_entries,
+                total_key_size,
+                total_value_size,
+                total_entries_size,
+            } => {
+                egui::Grid::new(format!("{database_name:?} stats"))
+                    .num_columns(2)
+                    .spacing([40.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Number Of Entries");
+                        ui.label(number_of_entries.to_string());
+                        ui.end_row();
+
+                        ui.label("Total Key Size");
+                        ui.label(total_key_size.to_string());
+                        ui.end_row();
+
+                        ui.label("Total Value Size");
+                        ui.label(total_value_size.to_string());
+                        ui.end_row();
+
+                        ui.label("Total Entries Size");
+                        ui.label(total_entries_size.to_string());
+                        ui.end_row();
                     });
             }
             Pane::OpenNew { database_to_open } => {
