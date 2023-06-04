@@ -8,13 +8,15 @@ use egui::Color32;
 use egui_extras::{Column, TableBuilder};
 use egui_tiles::{Container, Tile};
 use heed::types::ByteSlice;
-use heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn};
+use heed::{Database, Env, EnvOpenOptions, RwTxn};
 use once_cell::sync::OnceCell;
 use rfd::FileDialog;
+use txn::Txn;
 
 use crate::escaped_entry::EscapedEntry;
 
 mod escaped_entry;
+mod txn;
 
 static ENV: OnceCell<Env> = OnceCell::new();
 
@@ -37,61 +39,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-enum Txn {
-    /// A read-only transaction.
-    Ro(RoTxn<'static>),
-    /// A read-write transaction.
-    Rw(RwTxn<'static>),
-    None,
-}
-
-impl Txn {
-    /// Commit read-write transaction and change it to read-only. Noop for `Txn::Ro`.
-    fn commit(&mut self, env: &'static Env) {
-        self.end_rw(env, |wtxn| wtxn.commit().unwrap());
-    }
-
-    /// Abort read-write transaction and change it to read-only. Noop for `Txn::Ro`.
-    fn abort(&mut self, env: &'static Env) {
-        self.end_rw(env, |wtxn| wtxn.abort());
-    }
-
-    /// Refresh the current read transaction. Noop fro `Txn::Rw`.
-    fn refresh(&mut self, env: &'static Env) {
-        if matches!(self, Self::Ro(_)) {
-            // We must drop the rtxn before opening a new one as it is forbidden
-            // to have two transactions on the same thread at any given time.
-            let rtxn = mem::replace(self, Self::None);
-            drop(rtxn);
-            *self = Self::Ro(env.read_txn().unwrap());
-        }
-    }
-
-    fn end_rw(&mut self, env: &'static Env, f: fn(RwTxn<'static>)) {
-        match self {
-            Self::Ro(_) => (),
-            Self::None => unreachable!(),
-            Self::Rw(_) => {
-                // We should call `f` (which commits or aborts the read-write
-                // transaction) before creating a new read-only transaction,
-                // otherwise the read-only transaction will not see the changes
-                // made by the read-write transaction.
-                match mem::replace(self, Self::None) {
-                    Self::Rw(wtxn) => f(wtxn),
-                    Self::Ro(_) | Self::None => unreachable!(),
-                }
-                let rtxn = env.read_txn().unwrap();
-                match mem::replace(self, Self::Ro(rtxn)) {
-                    Self::None => (),
-                    Self::Ro(_) | Self::Rw(_) => unreachable!(),
-                }
-            }
-        }
-    }
-}
-
 struct LmdbEditor {
-    txn: Txn,
+    txn: txn::Txn,
     tree: egui_tiles::Tree<Pane>,
 }
 
@@ -121,7 +70,7 @@ impl LmdbEditor {
         let tree = egui_tiles::Tree::new(root, tiles);
 
         let rtxn = env.read_txn().unwrap();
-        LmdbEditor { txn: Txn::Ro(rtxn), tree }
+        LmdbEditor { txn: txn::Txn::Ro(rtxn), tree }
     }
 }
 
@@ -138,7 +87,7 @@ impl eframe::App for LmdbEditor {
 
                 if ui.add(button).clicked() && matches!(self.txn, Txn::Ro(_)) {
                     let wtxn = env.write_txn().unwrap();
-                    self.txn = Txn::Rw(wtxn);
+                    self.txn = txn::Txn::Rw(wtxn);
                 }
 
                 if matches!(self.txn, Txn::Rw(_)) {
@@ -209,7 +158,7 @@ impl Pane {
 }
 
 struct TreeBehavior<'a> {
-    txn: &'a mut Txn,
+    txn: &'a mut txn::Txn,
 }
 
 impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
@@ -259,7 +208,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     ui.add(egui::TextEdit::multiline(data).hint_text("escaped data"));
 
                     if ui.button("insert").clicked() {
-                        if let Txn::Rw(ref mut wtxn) = self.txn {
+                        if let txn::Txn::Rw(ref mut wtxn) = self.txn {
                             let key = entry_to_insert.decoded_key().unwrap();
                             let data = entry_to_insert.decoded_data().unwrap();
                             database.put(wtxn, &key, &data).unwrap();
@@ -268,7 +217,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     }
 
                     if ui.button("delete").clicked() {
-                        if let Txn::Rw(ref mut wtxn) = self.txn {
+                        if let txn::Txn::Rw(ref mut wtxn) = self.txn {
                             let key = entry_to_insert.decoded_key().unwrap();
                             database.delete(wtxn, &key).unwrap();
                             entry_to_insert.clear();
@@ -279,12 +228,12 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                 // If there is a write txn opened, use it, otherwise make the wtxn live longer and deref it.
                 let long_wtxn: &RwTxn;
                 let rtxn = match self.txn {
-                    Txn::Ro(ref rtxn) => rtxn,
-                    Txn::Rw(ref wtxn) => {
+                    txn::Txn::Ro(ref rtxn) => rtxn,
+                    txn::Txn::Rw(ref wtxn) => {
                         long_wtxn = wtxn;
                         long_wtxn.deref()
                     }
-                    Txn::None => unreachable!(),
+                    txn::Txn::None => unreachable!(),
                 };
 
                 let num_rows = database.len(rtxn).unwrap().try_into().unwrap();
@@ -346,12 +295,12 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     // If there is a write txn opened, use it, otherwise make the wtxn live longer and deref it.
                     let long_wtxn: &RwTxn;
                     let rtxn = match self.txn {
-                        Txn::Ro(ref rtxn) => rtxn,
-                        Txn::Rw(ref wtxn) => {
+                        txn::Txn::Ro(ref rtxn) => rtxn,
+                        txn::Txn::Rw(ref wtxn) => {
                             long_wtxn = wtxn;
                             long_wtxn.deref()
                         }
-                        Txn::None => unreachable!(),
+                        txn::Txn::None => unreachable!(),
                     };
 
                     ui.add(egui::TextEdit::singleline(database_to_open).hint_text("database name"));
