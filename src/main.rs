@@ -27,13 +27,12 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    // if let Some(env_path) = rfd::FileDialog::new().pick_folder() {
-    let env = unsafe { EnvOpenOptions::new().max_dbs(1000).open("edit-me-numbers.mdb")? };
+    let env_path = std::env::args().nth(1).expect("Expected an environment path as an argument");
+    let env = unsafe { EnvOpenOptions::new().max_dbs(1000).open(env_path)? };
     let _ = ENV.set(env);
 
     eframe::run_native("LMDB Editor", options, Box::new(|ctx| Box::new(LmdbEditor::new(ctx))))
         .unwrap();
-    // }
 
     Ok(())
 }

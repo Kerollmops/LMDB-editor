@@ -10,5 +10,4 @@ egui_extras = "0.26.0"
 egui_tiles = "0.7.2"
 env_logger = "0.10.0"
 heed = { version = "0.20.0", default-features = false, features = ["read-txn-no-tls"] }
-rfd = "0.14.1"
 stfu8 = "0.2.6"
