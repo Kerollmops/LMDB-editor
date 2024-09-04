@@ -4,11 +4,11 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::OnceLock;
 
-use eframe::egui::{self, InnerResponse};
+use eframe::egui::{self, Align, InnerResponse};
 use egui::Color32;
 use egui_extras::{Column, TableBuilder};
 use egui_tiles::{Container, Tile};
-use heed::types::Bytes;
+use heed::types::{Bytes, DecodeIgnore};
 use heed::{Database, Env, EnvOpenOptions, RwTxn};
 use txn::Txn;
 
@@ -57,6 +57,7 @@ impl LmdbEditor {
                 database_name: None,
                 database: main_db,
                 entry_to_insert: EscapedEntry::default(),
+                jump_to_key: String::new(),
             }),
             tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }),
         ];
@@ -137,6 +138,7 @@ enum Pane {
         database_name: Option<String>,
         database: Database<Bytes, Bytes>,
         entry_to_insert: EscapedEntry,
+        jump_to_key: String,
     },
     OpenNew {
         database_to_open: String,
@@ -171,7 +173,15 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
         ui.add_space(5.0);
 
         match pane {
-            Pane::DatabaseEntries { database, entry_to_insert, database_name, .. } => {
+            Pane::DatabaseEntries {
+                database,
+                entry_to_insert,
+                database_name,
+                ref mut jump_to_key,
+                ..
+            } => {
+                ui.add(egui::TextEdit::singleline(jump_to_key).hint_text("jump to key"));
+
                 let name = database_name.as_ref().map_or_else(|| "{main}".to_owned(), Clone::clone);
                 egui::Window::new(format!("Put an entry into {name}")).default_pos([720.0, 480.0]).show(ui.ctx(), |ui| {
                     ui.style_mut().spacing.interact_size.y = 0.0; // hack to make `horizontal_wrapped` work better with text.
@@ -228,11 +238,30 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                     txn::Txn::None => unreachable!(),
                 };
 
+                let scroll_to = if !jump_to_key.is_empty() {
+                    let mut i = 0;
+                    for result in database.iter(rtxn).unwrap().remap_data_type::<DecodeIgnore>() {
+                        let (k, _) = result.unwrap();
+                        if k >= jump_to_key.as_bytes() {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    Some(i)
+                } else {
+                    None
+                };
+
                 let num_rows = database.len(rtxn).unwrap().try_into().unwrap();
                 let mut prev_row_index = None;
                 let mut iter = database.iter(rtxn).unwrap();
 
-                TableBuilder::new(ui)
+                let builder = match scroll_to {
+                    Some(row) => TableBuilder::new(ui).scroll_to_row(row, Some(Align::TOP)),
+                    None => TableBuilder::new(ui),
+                };
+
+                builder
                     .column(
                         Column::auto_with_initial_suggestion(50.0).at_least(50.0).resizable(true),
                     )
@@ -313,6 +342,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                                 database,
                                 database_name,
                                 entry_to_insert: Default::default(),
+                                jump_to_key: String::new(),
                             })
                     } else {
                         None
