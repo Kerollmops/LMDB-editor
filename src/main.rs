@@ -2,15 +2,14 @@
 
 use std::mem;
 use std::ops::Deref;
+use std::sync::OnceLock;
 
 use eframe::egui::{self, InnerResponse};
 use egui::Color32;
 use egui_extras::{Column, TableBuilder};
 use egui_tiles::{Container, Tile};
-use heed::types::ByteSlice;
+use heed::types::Bytes;
 use heed::{Database, Env, EnvOpenOptions, RwTxn};
-use once_cell::sync::OnceCell;
-use rfd::FileDialog;
 use txn::Txn;
 
 use crate::escaped_entry::EscapedEntry;
@@ -18,23 +17,23 @@ use crate::escaped_entry::EscapedEntry;
 mod escaped_entry;
 mod txn;
 
-static ENV: OnceCell<Env> = OnceCell::new();
+static ENV: OnceLock<Env> = OnceLock::new();
 
 fn main() -> anyhow::Result<()> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
     let options = eframe::NativeOptions {
-        initial_window_size: Some(egui::vec2(720.0, 480.0)),
+        // initial_window_size: Some(egui::vec2(720.0, 480.0)),
         ..Default::default()
     };
 
-    if let Some(env_path) = FileDialog::new().pick_folder() {
-        let env = EnvOpenOptions::new().max_dbs(1000).open(env_path)?;
-        let _ = ENV.set(env);
+    // if let Some(env_path) = rfd::FileDialog::new().pick_folder() {
+    let env = unsafe { EnvOpenOptions::new().max_dbs(1000).open("edit-me-numbers.mdb")? };
+    let _ = ENV.set(env);
 
-        eframe::run_native("LMDB Editor", options, Box::new(|ctx| Box::new(LmdbEditor::new(ctx))))
-            .unwrap();
-    }
+    eframe::run_native("LMDB Editor", options, Box::new(|ctx| Box::new(LmdbEditor::new(ctx))))
+        .unwrap();
+    // }
 
     Ok(())
 }
@@ -46,13 +45,8 @@ struct LmdbEditor {
 
 impl LmdbEditor {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
-        // Restore app state using cc.storage (requires the "persistence" feature).
-        // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
-        // for e.g. egui::PaintCallback.
-
         // TODO do not try to create the database here.
-        let env = ENV.wait();
+        let env = ENV.get().unwrap();
         let mut wtxn = env.write_txn().unwrap();
         let main_db = env.create_database(&mut wtxn, None).unwrap();
         wtxn.commit().unwrap();
@@ -67,7 +61,7 @@ impl LmdbEditor {
             tiles.insert_pane(Pane::OpenNew { database_to_open: String::new() }),
         ];
         let root = tiles.insert_tab_tile(tabs);
-        let tree = egui_tiles::Tree::new(root, tiles);
+        let tree = egui_tiles::Tree::new("blabla", root, tiles);
 
         let rtxn = env.read_txn().unwrap();
         LmdbEditor { txn: txn::Txn::Ro(rtxn), tree }
@@ -78,7 +72,7 @@ impl eframe::App for LmdbEditor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let env = ENV.wait();
+                let env = ENV.get().unwrap();
                 let button = if matches!(self.txn, Txn::Rw(_)) {
                     egui::Button::new("currently writing").fill(Color32::GREEN)
                 } else {
@@ -98,10 +92,8 @@ impl eframe::App for LmdbEditor {
                     if ui.button("abort changes").clicked() {
                         self.txn.abort(env);
                     }
-                } else {
-                    if ui.button("refresh").clicked() {
-                        self.txn.refresh(env);
-                    }
+                } else if ui.button("refresh").clicked() {
+                    self.txn.refresh(env);
                 }
             });
 
@@ -143,7 +135,7 @@ impl eframe::App for LmdbEditor {
 enum Pane {
     DatabaseEntries {
         database_name: Option<String>,
-        database: Database<ByteSlice, ByteSlice>,
+        database: Database<Bytes, Bytes>,
         entry_to_insert: EscapedEntry,
     },
     OpenNew {
@@ -166,7 +158,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
         match pane {
             Pane::DatabaseEntries { database_name: Some(name), .. } => name.into(),
             Pane::DatabaseEntries { database_name: None, .. } => "{main}".into(),
-            Pane::OpenNew { .. } => "Open new".into(),
+            Pane::OpenNew { .. } => "Open new database".into(),
         }
     }
 
@@ -241,9 +233,11 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                 let mut iter = database.iter(rtxn).unwrap();
 
                 TableBuilder::new(ui)
-                    .column(Column::auto().resizable(true))
-                    .column(Column::auto().resizable(true))
-                    .column(Column::remainder())
+                    .column(
+                        Column::auto_with_initial_suggestion(50.0).at_least(50.0).resizable(true),
+                    )
+                    .column(Column::remainder().at_least(50.0).clip(true).resizable(true))
+                    .column(Column::initial(100.0).resizable(false))
                     .header(20.0, |mut header| {
                         header.col(|ui| {
                             ui.label("Keys");
@@ -256,7 +250,8 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                         });
                     })
                     .body(|body| {
-                        body.rows(30.0, num_rows, |row_index, mut row| {
+                        body.rows(30.0, num_rows, |mut row| {
+                            let row_index = row.index();
                             assert!(prev_row_index.map_or(true, |p| p + 1 == row_index));
                             if prev_row_index.is_none() {
                                 iter.by_ref().take(row_index).for_each(drop);
@@ -305,7 +300,7 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
 
                     ui.add(egui::TextEdit::singleline(database_to_open).hint_text("database name"));
                     if ui.button("open").clicked() {
-                        let env = ENV.wait();
+                        let env = ENV.get().unwrap();
                         let database_name = if database_to_open.is_empty() {
                             None
                         } else {
