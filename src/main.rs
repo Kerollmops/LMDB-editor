@@ -238,15 +238,16 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                 };
 
                 let scroll_to = if !jump_to_key.is_empty() {
-                    let mut i = 0;
-                    for result in database.iter(rtxn).unwrap().remap_data_type::<DecodeIgnore>() {
+                    let iter = database.iter(rtxn).unwrap().remap_data_type::<DecodeIgnore>();
+                    let mut count = 0;
+                    for (i, result) in iter.enumerate() {
                         let (k, _) = result.unwrap();
+                        count = i;
                         if k >= jump_to_key.as_bytes() {
                             break;
                         }
-                        i += 1;
                     }
-                    Some(i)
+                    Some(count)
                 } else {
                     None
                 };
@@ -261,20 +262,23 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                 };
 
                 builder
+                    .column(Column::exact(65.0).resizable(false))
                     .column(
-                        Column::auto_with_initial_suggestion(50.0).at_least(50.0).resizable(true),
+                        Column::auto_with_initial_suggestion(100.0)
+                            .at_least(100.0)
+                            .clip(true)
+                            .resizable(true),
                     )
                     .column(Column::remainder().at_least(50.0).clip(true).resizable(true))
-                    .column(Column::initial(100.0).resizable(false))
                     .header(20.0, |mut header| {
+                        header.col(|ui| {
+                            ui.label("Operations");
+                        });
                         header.col(|ui| {
                             ui.label("Keys");
                         });
                         header.col(|ui| {
                             ui.label("Values");
-                        });
-                        header.col(|ui| {
-                            ui.label("Operations");
                         });
                     })
                     .body(|body| {
@@ -292,22 +296,22 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior<'_> {
                                 let encoded_data = stfu8::encode_u8_pretty(data);
 
                                 row.col(|ui| {
-                                    ui.label(&encoded_key);
-                                });
-                                row.col(|ui| {
-                                    ui.label(&encoded_data);
-                                });
-                                row.col(|ui| {
                                     // TODO Replace me by a ✏️
                                     if ui.button("edit").clicked() {
-                                        entry_to_insert.key = encoded_key;
-                                        entry_to_insert.data = encoded_data;
+                                        entry_to_insert.key = encoded_key.clone();
+                                        entry_to_insert.data = encoded_data.clone();
                                     }
                                     // // Replace me by a red 🗑️
                                     // if ui.button("delete").clicked() {
                                     //     if let Some(wtxn) = self.wtxn.as_mut() {
                                     //     }
                                     // }
+                                });
+                                row.col(|ui| {
+                                    ui.label(&encoded_key);
+                                });
+                                row.col(|ui| {
+                                    ui.label(&encoded_data);
                                 });
                             }
                         });
